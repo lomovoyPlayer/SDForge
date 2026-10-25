@@ -1,0 +1,100 @@
+@startuml SDForge_Classes_Architecture
+title SDForge: архитектура плагина (обзор)
+skinparam packageStyle rectangle
+skinparam linetype ortho
+skinparam nodesep 30
+skinparam ranksep 30
+
+package "Точка входа" {
+  class SDForgeExtension {
+    - dlg
+    + createActions(window)
+    + show_dialog()
+  }
+}
+class Extension <<external>>
+
+package "Окно" {
+  class SDForgeDialog <<QDialog>> {
+    + closeEvent()
+  }
+}
+
+package "Панели и формы (см. рис. 3)" as PanelsForms {
+  class "Панели и библиотека форм" as Panels <<группа>>
+}
+note bottom of Panels
+  Панели: ProjectsPanel, SceneTreePanel, InspectorPanel,
+  MaterialsPanel, RenderSettingsPanel, FrameExportPanel,
+  TextureSlotsWidget, TexturePickerDialog.
+  Формы: Form, FormField, Binding, AttrBinding, AngleBinding.
+  От панелей: вызовы методов контроллера,
+  запись в params, запросы к Krita.
+end note
+
+package "Контроллер и состояние" {
+  class SceneController <<QObject>>
+  class RenderPreviewParams <<QObject>>
+  class SceneHistory
+}
+note bottom of SceneController
+  От панелей и окна: операции с деревом,
+  материалами, текстурами, проектами;
+  в params: set_scene_root + сигналы.
+end note
+
+package "Рендер" {
+  class SDFRenderPreviewer <<QWidget>>
+  class GPURenderer <<QObject>>
+  class SDFShaderManager
+}
+note right of SDFRenderPreviewer
+  От окна и панели экспорта: render_frame_export;
+  читает params; владеет GPURenderer
+  (чанковый рендер по QTimer).
+end note
+
+package "Данные" {
+  class "Модель сцены (см. рис. 4)" as Model <<группа>>
+  class Repository
+}
+note bottom of Model
+  GroupOperation, TreeObject, Operation,
+  Figure, Material, FigureTexture, Node.
+  От контроллера: find_node, коммиты;
+  от рендера: сцена в TBP-текстуру.
+end note
+
+class "Krita API" as Krita <<external>>
+
+SDForgeExtension --|> Extension
+SDForgeExtension .down.> SDForgeDialog
+
+SDForgeDialog *-down- Panels
+SDForgeDialog *-down- SceneController
+SDForgeDialog *-down- RenderPreviewParams
+SDForgeDialog *-down- SDFRenderPreviewer
+
+Panels .down.> SceneController
+Panels .down.> RenderPreviewParams
+Panels .right.> Krita
+
+SceneController *-down- Repository
+SceneController .down.> Model
+RenderPreviewParams *-- SceneHistory
+RenderPreviewParams *-down- Model
+
+SDFRenderPreviewer *-down- GPURenderer
+SDFRenderPreviewer ..> RenderPreviewParams
+GPURenderer .down.> SDFShaderManager
+GPURenderer .down.> Model
+Repository .down.> Model
+
+note as NLeg
+  *-- композиция (создаёт и владеет),
+  ..> зависимость (вызовы методов
+  и подписка на сигналы Qt;
+  контроллер о панелях не знает —
+  связь односторонняя)
+end note
+@enduml

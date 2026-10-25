@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=SDForge
+X-Python-2-Compatible=false
+X-Krita-Manual=Manual.html
+Name=SDForge
+Comment=Advanced 3D modeling plugin with Raymarching 
+Comment[ru]=Продвинутый плагин для 3D моделирования с технологией реймарчинг

@@ -1,0 +1,129 @@
+@startuml SDForge_Classes_Panels
+title SDForge: панели и библиотека форм
+skinparam packageStyle rectangle
+skinparam linetype ortho
+skinparam nodesep 30
+skinparam ranksep 50
+skinparam padding 4
+
+package "Библиотека форм" {
+  class Form <<QWidget>> {
+    + add_*(label, binding)
+    + add_specs(specs, target, commit)
+    + refresh()
+    + clear()
+  }
+  class FieldSpec
+  class FormField <<QWidget>> {
+    сигнал changed
+  }
+  class Binding {
+    + get()
+    + set(value)
+    - commit : callback
+  }
+  class AttrBinding
+  class AngleBinding
+}
+note right of Form
+  От панелей: InspectorPanel — Form(sync=True);
+  MaterialsPanel — MATERIAL_SPECS;
+  RenderSettingsPanel — CAMERA/QUALITY_SPECS;
+  FrameExportPanel — FRAME_EXPORT_SPECS.
+end note
+note bottom of AngleBinding
+  UI — градусы, данные — радианы
+end note
+
+package "Панели" {
+  class ProjectsPanel <<QWidget>>
+  class SceneTreePanel <<QWidget>>
+  class InspectorPanel <<QWidget>>
+  class MaterialsPanel <<QWidget>>
+  class RenderSettingsPanel <<QWidget>>
+  class FrameExportPanel <<QWidget>>
+  class TextureSlotsWidget <<QWidget>>
+  class TexturePickerDialog <<QDialog>>
+}
+
+package "Внешние (см. рис. 2, 5)" as Ext {
+  class SceneController
+  class RenderPreviewParams
+  class SDFRenderPreviewer
+  class "Krita: Документ" as KDoc <<external>>
+  class "Krita: Ресурсы" as KRes <<external>>
+}
+note left of SceneController
+  От панелей: ProjectsPanel — create/rename/delete_tree;
+  SceneTreePanel — add/move/remove_node;
+  InspectorPanel — commit_node;
+  MaterialsPanel — add/commit/remove_material.
+end note
+note left of RenderPreviewParams
+  От панелей: RenderSettingsPanel — запись настроек;
+  FrameExportPanel — frame_export_*.
+end note
+note left of SDFRenderPreviewer
+  От FrameExportPanel: render_frame_export.
+end note
+note left of KDoc
+  От FrameExportPanel: экспорт в слой (RGBA 8-bit).
+end note
+note left of KRes
+  От TexturePickerDialog: текстуры и теги.
+end note
+
+' ==== невидимый каркас раскладки ====
+Form -[hidden]down- ProjectsPanel
+
+ProjectsPanel -[hidden]right- RenderSettingsPanel
+RenderSettingsPanel -[hidden]right- SceneController
+SceneTreePanel -[hidden]right- FrameExportPanel
+FrameExportPanel -[hidden]right- RenderPreviewParams
+InspectorPanel -[hidden]right- TextureSlotsWidget
+TextureSlotsWidget -[hidden]right- SDFRenderPreviewer
+MaterialsPanel -[hidden]right- TexturePickerDialog
+TexturePickerDialog -[hidden]right- KDoc
+
+ProjectsPanel -[hidden]down- SceneTreePanel
+SceneTreePanel -[hidden]down- InspectorPanel
+InspectorPanel -[hidden]down- MaterialsPanel
+RenderSettingsPanel -[hidden]down- FrameExportPanel
+FrameExportPanel -[hidden]down- TextureSlotsWidget
+TextureSlotsWidget -[hidden]down- TexturePickerDialog
+SceneController -[hidden]down- RenderPreviewParams
+RenderPreviewParams -[hidden]down- SDFRenderPreviewer
+SDFRenderPreviewer -[hidden]down- KDoc
+KDoc -[hidden]down- KRes
+
+' ==== видимые связи ====
+InspectorPanel .up.> Form
+MaterialsPanel .up.> Form
+RenderSettingsPanel .up.> Form
+FrameExportPanel .up.> Form
+
+ProjectsPanel .right.> SceneController
+SceneTreePanel .right.> SceneController
+InspectorPanel .right.> SceneController
+MaterialsPanel .right.> SceneController
+RenderSettingsPanel .right.> RenderPreviewParams
+FrameExportPanel .right.> RenderPreviewParams
+FrameExportPanel .right.> SDFRenderPreviewer
+FrameExportPanel .right.> KDoc
+TexturePickerDialog .right.> KRes
+
+InspectorPanel *-- TextureSlotsWidget
+TextureSlotsWidget ..> TexturePickerDialog
+
+Form *-- "0..*" FormField
+Form ..> FieldSpec
+FormField o-- Binding
+AttrBinding --|> Binding
+AngleBinding --|> Binding
+
+note as NLeg
+  Все панели получают (params, controller)
+  и не знают друг о друге; обновление —
+  по сигналам контроллера и params
+end note
+@enduml

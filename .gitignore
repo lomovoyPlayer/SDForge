@@ -1,0 +1,8 @@
+/*
+!/SDForge/
+!/piplib/
+!/SDForge.desktop
+!.gitignore
+__pycache__/
+*.pyc
+~$*

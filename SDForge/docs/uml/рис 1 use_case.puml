@@ -1,0 +1,67 @@
+@startuml SDForge_UseCase
+title SDForge: диаграмма вариантов использования
+left to right direction
+skinparam linetype ortho
+
+actor "Пользователь" as User
+actor "Krita (хост-приложение)" as Krita << secondary >>
+
+rectangle "Плагин SDForge" {
+  usecase "Редактировать дерево сцены" as UC_Tree
+  usecase "Добавить фигуру / группу" as UC_Add
+  usecase "Переместить узел" as UC_Move
+  usecase "Дублировать узел" as UC_Dup
+  usecase "Удалить узел" as UC_Del
+  usecase "Редактировать параметры узла" as UC_Insp
+  usecase "Управлять камерой и\nтрансформациями во вьюпорте" as UC_View
+  usecase "Отменить / повторить изменение" as UC_Undo
+  usecase "Управлять материалами" as UC_Mat
+  usecase "Управлять проектами" as UC_Proj
+  usecase "Выбрать текстуры" as UC_Tex
+  usecase "Настроить параметры рендера" as UC_Set
+  usecase "Экспортировать кадр в файл" as UC_ExpF
+  usecase "Экспортировать кадр\nв слой Krita" as UC_ExpL
+}
+
+note as N1
+  Предусловие всех сценариев:
+  плагин запущен из меню Scripts
+end note
+
+User --> UC_Tree
+User --> UC_Insp
+User --> UC_View
+User --> UC_Undo
+User --> UC_Mat
+User --> UC_Proj
+User --> UC_Tex
+User --> UC_Set
+User --> UC_ExpF
+User --> UC_ExpL
+
+UC_Add ..> UC_Tree : <<extend>>
+UC_Move ..> UC_Tree : <<extend>>
+UC_Dup ..> UC_Tree : <<extend>>
+UC_Del ..> UC_Tree : <<extend>>
+
+UC_Tex -- Krita
+UC_ExpL -- Krita
+UC_Mat -- Krita
+UC_Set -- Krita
+
+note right of UC_Mat
+  Добавить, дублировать, удалить,
+  редактировать параметры
+end note
+note right of UC_Proj
+  Создать, дублировать, переименовать,
+  удалить, переключить; сохранение
+  в БД — автоматически при переключении
+  и закрытии окна
+end note
+note bottom of Krita
+  Плагин получает от хост-приложения
+  ресурсы текстур, активный документ
+  и цвет кисти/фона для полей цвета
+end note
+@enduml

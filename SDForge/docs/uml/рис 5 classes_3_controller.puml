@@ -1,0 +1,122 @@
+@startuml SDForge_Classes_Controller
+title SDForge: контроллер, состояние и данные
+skinparam linetype ortho
+skinparam nodesep 40
+skinparam ranksep 50
+
+class SceneController <<QObject>> {
+  - repo : Repository
+  - current_tree_id : int
+  - selected_node_ids : list
+  - texture_loader, texture_size_probe
+  + open_tree(tree_id)
+  + switch_tree(tree_id)
+  + close_current_tree()
+  + add_figure_node(parent_db_id)
+  + add_group_node(parent_db_id)
+  + move_node(node_db_id, new_parent_db_id)
+  + duplicate_node(node_db_id)
+  + remove_node(node_db_id)
+  + commit_node(node)
+  + add_material(name)
+  + commit_material(material_db_id)
+  + remove_material(material_db_id)
+  + duplicate_material(material_db_id)
+  + register_texture(path)
+  + reload_textures()
+  + select_node(db_id)
+  + find_node(db_id)
+  + save_selected_scene()
+  + save_all()
+}
+note bottom of SceneController
+  сигналы: tree_loaded, node_structure_changed,
+  node_updated, selection_changed,
+  materials_changed, textures_changed
+end note
+
+class RenderPreviewParams <<QObject>> {
+  - scene_root : GroupOperation
+  - render_settings : dict
+  - control_settings : dict
+  - camera_pos, camera_rot, camera_fov_deg
+  - materials, texture_images, texture_filenames
+  + set_scene_root(scene_root)
+  + emit_changed()
+  + emit_scene_changed()
+  + undo_scene()
+  + redo_scene()
+}
+note bottom of RenderPreviewParams
+  сигналы: changed, scene_changed,
+  shader_changed, history_restored
+end note
+
+class SceneHistory {
+  - max_states
+  + activate(tree_id, root)
+  + forget(tree_id)
+  + clear()
+}
+
+class SDFRenderPreviewer <<QWidget>> {
+  - renderer : GPURenderer
+  + set_sdf_dict(sdf_dict)
+  + render_frame_export(on_finished, base_size)
+}
+
+class GPURenderer <<QObject>> {
+  + start_export(payload)
+  + render_chunk()
+  + set_texture_array(images)
+}
+note bottom of GPURenderer
+  сигналы: frame_ready, init_done,
+  export_progress_changed, export_done;
+  чанковый рендер по QTimer в главном потоке
+end note
+
+class Repository {
+  + load_tree(tree_id)
+  + replace_tree(tree_id, root)
+  + add_node(tree_id, parent_db_id, kind)
+  + move_node(node_db_id, new_parent_db_id)
+  + duplicate_node(node_db_id)
+  + remove_node(node_db_id)
+  + update_node(db_id)
+  + sync_builtin_tree(name, root)
+  + sync_builtin_materials(defaults)
+  + sync_builtin_sdf_types(sdf_dict)
+  + add_material(material, name)
+  + update_material(material_id)
+  + remove_material(material_id)
+  + duplicate_material(material_id)
+  + list_materials()
+  + register_texture(filename, name)
+  + list_textures()
+  + remove_texture(texture_id)
+  + get_tree_settings(tree_id)
+  + update_tree_settings(tree_id, partial)
+  + get_misc()
+  + update_misc(partial)
+}
+note bottom of Repository
+  подключение — синглтон db.get_connection()
+  (db.py: миграции, sdforge.db, SQLite, WAL)
+end note
+
+package "Модель сцены (см. рис. 4)" as ModelRef {
+  class GroupOperation
+  class Node
+}
+
+SceneController *-- Repository : "создаёт и владеет"
+SceneController ..> RenderPreviewParams : "set_scene_root, сигналы"
+SceneController ..> GroupOperation : "find_node"
+RenderPreviewParams *-- GroupOperation : "scene_root"
+RenderPreviewParams *-- SceneHistory
+SDFRenderPreviewer *-- GPURenderer
+SDFRenderPreviewer ..> RenderPreviewParams : "читает params"
+GPURenderer ..> Node : "сцена в TBP-текстуру"
+Repository ..> GroupOperation : "сериализация"
+@enduml

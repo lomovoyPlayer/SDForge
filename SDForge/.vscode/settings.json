@@ -1,0 +1,8 @@
+{
+    "python.analysis.extraPaths": [
+        "c:\\Users\\сергей\\.vscode\\extensions\\mcunderground.kritaexec-1.0.4\\krita-lang",
+        "C:/Users/сергей/AppData/Roaming/krita/pykrita/piplib",
+        "C:/Users/сергей/AppData/Roaming/krita/pykrita"
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:system"
+}

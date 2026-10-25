@@ -1,0 +1,90 @@
+@startuml SDForge_Classes_Model
+title SDForge: модель сцены
+skinparam linetype ortho
+skinparam nodesep 35
+skinparam ranksep 45
+
+class GroupOperation {
+  - op_type : int
+  - operands : float[4]
+  - unary_op_type : int
+  - unary_operands : float[4]
+  - parent : GroupOperation
+  - childs : list
+  + add_child(child)
+  + remove_child(child)
+  + get_ancestor()
+}
+
+class TreeObject {
+  - base_object : Operation
+  - unary_op : Operation
+  + get_pair()
+}
+
+class Operation {
+  - op_type : int
+  - operands : float[4]
+  - figure : Figure
+  + to_node(t) : Node
+}
+
+class Figure {
+  - type : int
+  - albedo : float[3]
+  - material_id : int
+  - translation, rotation, elongation : float[3]
+  - scale : float
+  - node_textures : FigureTexture[3]
+  - trajectory_fn_id : str
+  - trajectory_params : dict
+  + to_node(t) : Node
+  + calculate_textures()
+  + get_used_textures()
+}
+
+class Material {
+  - roughness, metallic, transmission : float
+  - subsurface, ior, emission : float
+  - sss_color : float[3]
+  + to_dict()
+}
+
+class FigureTexture {
+  - id, offset, rotation
+  - original_size, tiling_scale
+}
+class FigureHeightmap {
+  - depth_scale : float
+}
+class Node {
+  - operation_type : int
+  - figure_type : int
+  - params : list
+}
+
+note as NComp
+  Общего базового класса нет:
+  дочерние элементы разнотипные
+  (TreeObject и GroupOperation);
+  Operation при add_child
+  оборачивается в TreeObject
+end note
+NComp .. GroupOperation
+
+FigureHeightmap --|> FigureTexture
+GroupOperation *-- "0..*" TreeObject : childs
+GroupOperation *-- "0..*" GroupOperation : childs
+TreeObject *-- "1" Operation : base_object
+TreeObject *-- "0..1" Operation : unary_op
+Operation o-- "0..1" Figure
+Figure *-- "3" FigureTexture : node_textures
+Figure ..> Material : material_id
+Figure ..> Node : to_node()
+Operation ..> Node : to_node()
+
+note bottom of Figure
+  node_textures = [albedo, normal, height];
+  слот height — экземпляр FigureHeightmap
+end note
+@enduml

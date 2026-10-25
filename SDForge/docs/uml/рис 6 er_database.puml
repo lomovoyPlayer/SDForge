@@ -1,0 +1,78 @@
+@startuml SDForge_ER
+title SDForge: схема базы данных (sdforge.db, схема v2)
+skinparam linetype ortho
+skinparam nodesep 70
+skinparam ranksep 120
+
+entity "trees" as trees {
+  * **id** : INTEGER PK AUTOINCREMENT
+  --
+  name : TEXT UNIQUE
+  created_at / updated_at : TEXT
+  render_settings : TEXT JSON
+  is_builtin : INTEGER
+}
+
+entity "nodes" as nodes {
+  * **id** : INTEGER PK AUTOINCREMENT
+  --
+  tree_id : FK -> trees, ON DELETE CASCADE
+  parent_id : FK -> nodes, NULL = корень, CASCADE
+  rank : REAL  // дробный индекс позиции среди siblings //
+  kind : TEXT  // 'group' | 'figure' //
+  name : TEXT
+  optype : INTEGER
+  operands : TEXT JSON vec4
+  unaryoptype : INTEGER  // -1 = нет //
+  unaryoperands : TEXT JSON vec4
+  figure : TEXT JSON  // payload Figure //
+}
+
+entity "materials" as materials {
+  * **id** : INTEGER PK AUTOINCREMENT
+  --
+  name : TEXT
+  order_index : REAL  // дробный индекс позиции //
+  params : TEXT JSON
+  is_builtin : INTEGER
+}
+
+entity "textures" as textures {
+  * **id** : INTEGER PK AUTOINCREMENT
+  --
+  filename : TEXT UNIQUE  // krita://<тип>/<имя> //
+  name : TEXT
+  order_index : REAL  // дробный индекс позиции //
+}
+
+entity "sdf_types" as sdf_types {
+  * **id** : INTEGER PK  // == позиция имени в словаре шейдера //
+  --
+  name : TEXT
+  glsl_code : TEXT
+  is_builtin : INTEGER
+}
+
+entity "meta" as meta {
+  control_settings : TEXT JSON
+  misc : TEXT JSON
+  --
+  // ровно одна строка: idx_meta_singleton //
+}
+
+trees ||--o{ nodes : tree_id
+nodes ||--o{ nodes : parent_id
+
+nodes }.. materials : material_id в figure-JSON (не FK)
+nodes }.. textures : filename в слотах figure-JSON (не FK)
+nodes }.. sdf_types : figure_type в figure-JSON (не FK)
+
+note bottom of nodes
+  Индексы: idx_nodes_tree (tree_id, parent_id, rank);
+  idx_nodes_root — UNIQUE (tree_id) WHERE parent_id IS NULL
+end note
+note bottom of materials
+  Индекс: idx_materials_builtin_name —
+  UNIQUE (name) WHERE is_builtin = 1
+end note
+@enduml
