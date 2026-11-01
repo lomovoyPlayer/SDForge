@@ -297,11 +297,11 @@ class RenderPreviewParams(QtCore.QObject):
 
         #region Настройки сцены и рендера и запись в render_settings
         self.ambient_color = [0.18, 0.20, 0.24]
-        self.ambient_intensity = 1.0
+        self.ambient_intensity = 0.3
         self.sky_sun_azimuth_deg = 210.0
         self.sky_sun_elevation_deg = 35.0
         self.sky_sun_ang_radius = 0.009*3
-        self.sky_air_density = 0.06
+        self.sky_air_density = 0.5
         self.light_power_scale = 1.0
         self.show_floor = True
         self.transparent_background = False

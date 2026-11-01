@@ -1268,51 +1268,141 @@ vec3 sunDirection()
     ));
 }
 
-// Спектрально упрощённая модель неба: Рэлеевское затухание к горизонту,
-// сияние вокруг диска и сам диск. Цвет атмосферы — u_ambientLightColor,
-// яркость диска — u_ambientLightIntensity.
-vec3 skyRadiance(vec3 dir, bool includeSunDisc)
-{
-    vec3 sunDir = sunDirection();
-    float cosSun = dot(dir, sunDir);
-    vec3 atmColor = u_ambientLightColor; // перепрофилирован в цвет атмосферы
+const float SKY_TAU          = 0.3;   // оптическая толща синего канала в зените
+const float SKY_CHROMA       = 2.0;   // избирательность рассеяния (1.5..3)
+const float SKY_TWILIGHT_DEG = 14.0;  // глубина сумерек в градусах
+const float SKY_HORIZON_GAIN = 0.35;  // насколько горизонт светлее и белее зенита
+const float SKY_STAR_DENSITY = 0.07;  // доля заполненных ячеек (0.03..0.1)
+const float SKY_STAR_GAIN    = 7.0;   // яркость звёзд в HDR
+const float SKY_STAR_AMBIENT = 0.02;  // слабый вклад звёзд в эмбиент, 0 — выкл
 
-    // Оптическая толщина воздуха: минимум у зенита, растёт к горизонту.
-    float mu = clamp(dir.y, 0.02, 1.0);
-    float opt = u_skyAirDensity / mu;
+vec3  gSunDir;
+vec3  gSkyBeta;
+vec3  gSunTrans;
+float gSkyDay;
 
-    vec3 zenith  = atmColor * u_ambientLightIntensity;
-    vec3 horizon = (atmColor * exp(-opt * 0.15) + vec3(0.03, 0.015, 0.005))
-                 * u_ambientLightIntensity;
-    vec3 sky = mix(horizon, zenith, pow(mu, 0.5));
+float airMass(float s) {
+    s = clamp(s, 0.0, 1.0);
+    float e = degrees(asin(s));
+    return 1.0 / (s + 0.50572 * pow(e + 6.07995, -1.6364));
+}
 
-    // Общий скейл яркости светила (аналогичный lightPowerEstimate).
+void initSky() {
+    gSunDir = sunDirection();
+    vec3 C  = max(u_ambientLightColor, vec3(1e-3));
+    vec3 Cn = C / max(max(C.r, C.g), C.b);
+    gSkyBeta = SKY_TAU * u_skyAirDensity * pow(Cn, vec3(SKY_CHROMA));
+
+    vec3  T  = exp(-gSkyBeta * airMass(gSunDir.y));
+    float mx = max(max(T.r, T.g), T.b);
+    gSunTrans = (T / mx) * pow(mx, 0.3);
+
+    float h = asin(clamp(gSunDir.y, -1.0, 1.0));
+    float d = smoothstep(-radians(SKY_TWILIGHT_DEG), radians(2.0), h);
+    gSkyDay = d * d + 0.002;
+}
+
+vec3 hash33(vec3 p) {
+    p = fract(p * vec3(.1031, .1030, .0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.xxy + p.yxx) * p.zyx);
+}
+
+vec3 starField(vec3 dir, float tm) {
+    float pxAng = 2.0 * tan(0.5 * radians(u_fovYDeg)) / u_resolution.y;
+    vec3 acc = vec3(0.0);
+    for (int L = 0; L < 2; L++) {
+        float scale = (L == 0) ? 70.0 : 160.0;
+        vec3 q  = dir * scale + 17.3 * float(L);
+        vec3 id = floor(q);
+        vec3 h1 = hash33(id);
+        if (h1.x > SKY_STAR_DENSITY) continue;
+        vec3 h2 = hash33(id + 71.7);
+
+        vec3  c     = id + 0.5 + (h2 - 0.5) * 0.5;
+        float mag   = pow(h1.y, 6.0);
+        float rTrue = mix(0.06, 0.22, mag);
+        float rUse  = max(rTrue, pxAng * scale * 0.8);
+        float d     = length(q - c);
+        float core  = 1.0 - smoothstep(0.0, rUse, d);
+        core *= core;
+
+        float energy = clamp((rTrue * rTrue) / (rUse * rUse), 0.0, 1.0);
+        float bright = mix(0.15, 1.0, mag) * energy;
+        float tw = 1.0 - 0.4 * (0.5 + 0.5 * sin(tm * mix(0.8, 3.5, h2.z) + 6.2831853 * h1.z));
+
+        vec3 col = mix(vec3(1.0, 0.72, 0.5), vec3(0.65, 0.78, 1.0), h2.y);
+        col = mix(col, vec3(1.0), 0.4);
+        acc += col * core * bright * tw;
+    }
+    return acc;
+}
+
+vec3 skyRadianceEx(vec3 dir, bool includeSunDisc, bool includeStars) {
+    vec3  C = u_ambientLightColor;
+    float I = u_ambientLightIntensity;
+    // Для лучей освещения (includeStars == false) профиль по высоте сглаживаем:
+    // ≤12 лучей не разрешают резкий градиент у горизонта.
+    float soft = includeStars ? 0.01 : 0.30;
+    float up = 0.5 * (dir.y + sqrt(dir.y * dir.y + soft * soft)); // гладкий max(dir.y, 0)
+    float cosSun = dot(dir, gSunDir);
+
+    float mv = airMass(max(up, includeStars ? 0.0 : 0.12)); // в освещении потолок воздушной массы ≈ 8
+    float ms = airMass(gSunDir.y);
+
+    float nearSun = pow(clamp(cosSun, 0.0, 1.0), 4.0) * exp(-3.0 * up);
+    // у низкого солнца минимум k растёт: весь купол освещён через длинный путь
+    float lowSun = 1.0 - clamp(gSunDir.y * 4.0, 0.0, 1.0);
+    float kMin = mix(0.08, 0.45, lowSun);
+    float k = mix(kMin, 0.9, nearSun);
+    vec3 illum = exp(-gSkyBeta * (ms - 1.0) * k);
+    float mi = max(max(illum.r, illum.g), illum.b);
+    illum *= pow(mi, -0.35); // было -0.7: меньше компрессии, яркий закат компенсируется ореолом
+    // дополнительное затемнение противосолнечной половины
+    float away = pow(clamp(-cosSun * 0.5 + 0.5, 0.0, 1.0), 2.0);
+    illum *= mix(1.0, mix(1.0, 0.3, away), lowSun);
+
+    vec3 Sraw = 1.0 - exp(-gSkyBeta * mv);
+    vec3 Zraw = 1.0 - exp(-gSkyBeta);
+    vec3 R = max(Sraw / max(Zraw, vec3(1e-4)), vec3(1.0));
+
+    vec3 sky = C * I * pow(R, vec3(SKY_HORIZON_GAIN)) * illum * gSkyDay;
+
     float sunScale = 3.0 * u_LightPowerScale;
-
-    // Сияние вокруг диска: два лепестка — узкий яркий обод и широкая слабая аура.
     float innerGlow = pow(max(cosSun, 0.0), 1.0 / max(SKY_SUN_GLOW_INNER, 0.001));
     float outerGlow = pow(max(cosSun, 0.0), 1.0 / max(SKY_SUN_GLOW, 0.001));
-    float glow = innerGlow * 0.6 + outerGlow * 0.1;
-    sky += atmColor * glow * u_ambientLightIntensity * sunScale;
+    sky += gSunTrans * (innerGlow * 0.6 + outerGlow * 0.1) * I * sunScale * gSkyDay;
 
-    if (includeSunDisc)
-    {
+    if (includeSunDisc) {
         float cosRadius = cos(u_skySunAngRadius);
         float disc = smoothstep(cosRadius, cosRadius + 0.0005, cosSun);
-        sky += atmColor * disc * SKY_SUN_DISC_EXPOSURE * u_ambientLightIntensity * sunScale;
+        disc *= smoothstep(-0.01, 0.01, dir.y);
+        sky += gSunTrans * disc * SKY_SUN_DISC_EXPOSURE * I * sunScale;
     }
 
-    // Ниже горизонта: быстрое затухание к отражённому от земли свету,
-    // чтобы вертикальные поверхности не получали чёрную полосу терминатора.
-    if (dir.y < 0.0)
     {
-        float under = exp(dir.y * 4.0);
-        vec3 groundBounce = atmColor * u_ambientLightIntensity * SKY_GROUND_BOUNCE;
-        sky = mix(groundBounce, sky, under);
+        // фон: прежний узкий переход; освещение: широкий гладкий
+        float skyW = includeStars ? exp(min(dir.y, 0.0) * 4.0)
+                                  : smoothstep(-0.6, 0.15, dir.y);
+        vec3 zen = C * I * gSkyDay;
+        vec3 groundBounce = (zen + gSunTrans * I * 0.5 * max(gSunDir.y, 0.0)) * SKY_GROUND_BOUNCE;
+        sky = mix(groundBounce, sky, skyW);
     }
 
+    float lum = dot(sky, vec3(0.2126, 0.7152, 0.0722));
+    float night = 1.0 - smoothstep(0.015, 0.15, lum);
+
+    if (includeStars) {
+        float vis = night * smoothstep(0.0, 0.06, dir.y);
+        if (vis > 0.0)
+            sky += starField(dir, u_time) * vis * SKY_STAR_GAIN * exp(-gSkyBeta * mv * 0.5);
+    } else {
+        sky += vec3(0.8, 0.9, 1.0) * SKY_STAR_AMBIENT * night * smoothstep(-0.1, 0.2, dir.y);
+    }
     return sky;
 }
+
+vec3 skyBackground(vec3 dir) { return skyRadianceEx(dir, true, true); }
 
 // Пропускание атмосферы на заданной дистанции.
 float aerialTransmittance(float dist)
@@ -1329,8 +1419,7 @@ vec3 applyAerialPerspective(vec3 color, float dist, vec3 dir)
     float g = SKY_HG_G;
     float denom = 1.0 + g * g - 2.0 * g * cosGamma;
     float phase = (1.0 - g * g) / (4.0 * PI * pow(max(denom, 0.001), 1.5));
-    vec3 inscatter = u_ambientLightColor
-                   * u_ambientLightIntensity
+    vec3 inscatter = skyRadianceEx(normalize(vec3(dir.x, max(dir.y, 0.02), dir.z)), false, false)
                    * (1.0 - T)
                    * phase;
     return color * T + inscatter;
@@ -1402,7 +1491,7 @@ int skyRayDirections(vec3 N, int numRays, out vec3 dirs[SKY_RAY_MAX], out int su
 
 vec3 getBackground(vec3 origin, vec3 dir, out float backgroundAlpha, bool directRay)
 {
-    vec3 backgroundColor = skyRadiance(dir, true);
+    vec3 backgroundColor = skyBackground(dir);
     backgroundAlpha = 1.0;
     float floorAlpha = 0.0;
 
@@ -2277,7 +2366,7 @@ vec3 lightPowerEstimate(int lightNodeId, int lightParamsStart, vec3 surfPos, out
 
 // Небо — виртуальный источник: конкурирует за кольцевые лучи
 // той же мерой, что лампы. u_ambientLightIntensity перепрофилировано в яркость светила.
-float pwSky = u_ambientLightIntensity * SKY_SUN_DISC_EXPOSURE * 0.3 * u_LightPowerScale; // калибровочная подборка
+float pwSky = u_ambientLightIntensity * SKY_SUN_DISC_EXPOSURE * 0.3 * u_LightPowerScale * gSkyDay; // калибровочная подборка
 
 
 
@@ -2478,14 +2567,17 @@ vec3 shadeSurface(
                     float wrapAmt = 0.4 * clamp(material.subsurface, 0.0, 1.0);
                     float NdotLdiff_i = clamp((NdotLi + wrapAmt) / (1.0 + wrapAmt), 0.0, 1.0);
 
-                    vec3 radiance_i = skyRadiance(Li, isSunSample);
+                    vec3 radiance_i = skyRadianceEx(Li, isSunSample, false);
                     // Солнце: направленный источник, вес 1 делится между сэмплами;
                     // кольца: нормированы на свой набор.
                     float wSky = isSunSample
                         ? (1.0 / float(sunCount))
                         : (SKY_AMBIENT_SCALE / max(float(nSky - sunCount), 1.0));
 
-                    directLight += diffuse_i * NdotLdiff_i * radiance_i * vis * wSky * horizonFade;
+                    // Шероховатый металл: потерянное зеркало возвращается как отклик цветом F0
+                    float metalLobe = metallic * (1.0 - mix(1.0, 0.12, smoothstep(0.35, 0.90, roughness)));
+                    vec3 diffuse_m = diffuse_i + F0 * metalLobe * opaquePart / PI;
+                    directLight += diffuse_m * NdotLdiff_i * radiance_i * vis * wSky * horizonFade;
                 }
 
                 // Спекуляр от диска светила — один аналитический блик по точному sunDir
@@ -2502,7 +2594,7 @@ vec3 shadeSurface(
                         float NdotLsun = max(dot(N, sunDir), 0.0);
                         float Dsun = D_GGX(NdotHsun, roughness);
                         float Gsun = G_Smith(NdotV, NdotLsun, roughness);
-                        vec3 specular_sun = Dsun * Gsun * Fsun / max(4.0 * NdotV * NdotLsun, 0.001);
+                        vec3 specular_sun = Dsun * Gsun * Fsun * NdotLsun / max(4.0 * NdotV * NdotLsun, 0.001);
 
                         float latexSpecBoost =
                             1.0 + 12.0
@@ -2510,7 +2602,7 @@ vec3 shadeSurface(
                             * (1.0 - smoothstep(0.35, 0.75, roughness));
                         specular_sun *= latexSpecBoost;
 
-                        vec3 radiance_sun = skyRadiance(sunDir, true);
+                        vec3 radiance_sun = skyRadianceEx(sunDir, true, false);
                         float horizonFadeSun = clamp(NdotLsun / u_skySunAngRadius + 1.0, 0.0, 1.0);
                         directLight += specular_sun * radiance_sun * meanSunVis * horizonFadeSun;
                     }
@@ -2542,7 +2634,7 @@ vec3 shadeSurface(
                     float thinBoost = mix(1.0, 0.4 + exp(-thickV * 2.0), SSS_THIN_GLOW);
                     float rimAtten = 0.35 + 0.65 * smoothstep(0.0, 0.35, abs(dot(Ns, V)));
 
-                    vec3 sunRadiance = skyRadiance(sunDir, true);
+                    vec3 sunRadiance = skyRadianceEx(sunDir, true, false);
                     vec3 sssLight = sunRadiance * sssTint
                         * (back + SSS_FRONT_WEIGHT * wrap * thinBoost)
                         * SSS_INTENSITY * rimAtten;
@@ -2740,7 +2832,9 @@ vec3 shadeSurface(
             // пересчитываем только дистанционный член
             vec3 radiance_i = radiance * (max(dist2, 0.0625) / max(d2s, 0.0625));
 
-            directLight += (diffuse_i * NdotLdiff_i + specular_i * NdotLiPos) * radiance_i * vis * w;
+            float metalLobeL = metallic * (1.0 - mix(1.0, 0.12, smoothstep(0.35, 0.90, roughness)));
+            vec3 diffuse_mL = diffuse_i + F0 * metalLobeL * opaquePart / PI;
+            directLight += (diffuse_mL * NdotLdiff_i + specular_i * NdotLiPos) * radiance_i * vis * w;
 
         }
 
@@ -2843,7 +2937,7 @@ vec3 shadeSurfaceCheap(
         // Полусферный остаток без марша: приближение рассеянного неба.
         vec3 skyDirUp   = N;
         vec3 skyDirDown = normalize(vec3(N.x, -0.3, N.z));
-        vec3 hemiSky = mix(skyRadiance(skyDirDown, false), skyRadiance(skyDirUp, false), N.y * 0.5 + 0.5);
+        vec3 hemiSky = mix(skyRadianceEx(skyDirDown, false, false), skyRadianceEx(skyDirUp, false, false), N.y * 0.5 + 0.5);
         result += hemiSky * surfAlbedo * opaquePart * 0.35;
 
         // Луч к светилу: дистанционный марш, без преломлений.
@@ -2853,7 +2947,7 @@ vec3 shadeSurfaceCheap(
             float ownLen = 0.0;
             vec3 vis = skyVisibilityCone(surfPos + N * 0.02, sunDir, SKY_VIS_DIST_RING,
                                           u_skySunAngRadius, false, -1, ownLen);
-            result += surfAlbedo * opaquePart * skyRadiance(sunDir, true) * vis * dot(N, sunDir) * 0.35;
+            result += surfAlbedo * opaquePart * skyRadianceEx(sunDir, true, false) * vis * dot(N, sunDir) * 0.35;
         }
     }
 
@@ -3120,6 +3214,7 @@ vec3 ACESFilmToneMap(vec3 c)
 
 void main()
 {
+    initSky();
     // Субпиксельный джиттер: сид 0 — эталон (центр пикселя, старое поведение),
     // сид > 0 — смещение в пределах пикселя; кадры с разными сидами
     // усредняются на хосте в чистый AA
@@ -3573,8 +3668,11 @@ void main()
                         smoothstep(0.35, 0.90, roughness)
                     );
                 
-                    // Металл сохраняет отражение; неметалл с высокой roughness его теряет.
-                    float metallicReflection = mix(roughReflection, 1.0, metallic);
+                    // // Металл сохраняет отражение; неметалл с высокой roughness его теряет.
+                    // float metallicReflection = mix(roughReflection, 1.0, metallic);
+
+                    // Металл: зеркальную долю гасим шероховатостью, остаток возвращают лучи освещения
+                    float metallicReflection = roughReflection;
                 
                     throughput *= F * metallicReflection;
                 
@@ -3803,8 +3901,11 @@ void main()
                         }
                         else
                         {
-                            // Мягкое скольжение по краю обычного объекта
-                            accumulatedColor += throughput * gAlbedo * coverage;
+                            // У собственного узла подмешка альбедо неосвещённая и даёт
+                            // равномерное свечение/тёмное пятно в центре — добавки нет,
+                            // энергия луча блокируется как раньше
+                            if (grazingNodeId != NodeId)
+                                accumulatedColor += throughput * gAlbedo * coverage;
                             throughput *= (1.0 - coverage); // Твердый объект блокирует луч сильнее
                         }
 
