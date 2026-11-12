@@ -180,7 +180,7 @@ class FrameExportPanel(QtWidgets.QWidget):
 		if self._export_started_at is None:
 			return ""
 		elapsed = time.perf_counter() - self._export_started_at
-		return f"{int(elapsed)} с"
+		return localization.get_text("frame_export_panel.elapsed_seconds", seconds=int(elapsed))
 
 	def _on_export_progress(self, done: int, total: int) -> None:
 		if total <= 0:
@@ -224,7 +224,7 @@ class FrameExportPanel(QtWidgets.QWidget):
 		self._btn_file.setEnabled(False)
 		self._progress.setMaximum(100)
 		self._progress.setValue(0)
-		self._progress.setFormat("Подготовка…")
+		self._progress.setFormat(localization.get_text("frame_export_panel.export_progress_preparing"))
 		self._progress.setVisible(True)
 
 		base_size: tuple[int, int] = self._compute_base_size()
@@ -255,7 +255,7 @@ class FrameExportPanel(QtWidgets.QWidget):
 		path: str
 		path, _flt = QtWidgets.QFileDialog.getSaveFileName(
 			self, localization.get_text("frame_export_panel.export_to_file.dialog.caption"), "frame.png",
-			"PNG (*.png);;JPEG (*.jpg);;Все файлы (*)")
+			localization.get_text("frame_export_panel.export_to_file.dialog.filter"))
 		if not path:
 			return
 		if not path.lower().endswith((".png", ".jpg", ".jpeg")):

@@ -136,6 +136,11 @@ L_RU: dict[str, str] = {
 
 #region forms
 "forms.add_spec.error.unknown_kind": "Неизвестный kind: {kind!r}",
+"forms.color_field.title": "Цвет",
+"forms.color_field.krita_foreground.button": "Кисть",
+"forms.color_field.krita_foreground.tooltip": "Взять цвет переднего плана (кисти) из Krita",
+"forms.color_field.krita_background.button": "Фон",
+"forms.color_field.krita_background.tooltip": "Взять фоновый цвет из Krita",
 
 #endregion
 
@@ -168,6 +173,9 @@ L_RU: dict[str, str] = {
 "frame_export_panel.warning.no_active_document": "Документ был закрыт во время рендера.",
 "frame_export_panel.warning.document_not_rgba-8-bit": "Поддерживается только RGBA 8-bit, у документа {colorModel}/{colorDepth}.",
 "frame_export_panel.render_done": "Готово",
+"frame_export_panel.elapsed_seconds": "{seconds} с",
+"frame_export_panel.export_progress_preparing": "Подготовка…",
+"frame_export_panel.export_to_file.dialog.filter": "PNG (*.png);;JPEG (*.jpg);;Все файлы (*)",
 
 #endregion
 
@@ -280,6 +288,9 @@ L_RU: dict[str, str] = {
 "scene_tree_panel.buttons.add_group": "+ Группа",
 "scene_tree_panel.buttons.duplicate": "Дублировать",
 "scene_tree_panel.buttons.delete": "Удалить",
+
+"scene_tree_panel.on_add_group.warning.title": "Создать группу",
+"scene_tree_panel.on_add_group.warning.text": "Выделенные узлы должны быть в одной группе-родителе.",
 
 #endregion
 
@@ -531,6 +542,11 @@ L_EN: dict[str, str] = {
 
 #region forms
 "forms.add_spec.error.unknown_kind": "Unknown kind: {kind!r}",
+"forms.color_field.title": "Color",
+"forms.color_field.krita_foreground.button": "Brush",
+"forms.color_field.krita_foreground.tooltip": "Use the foreground (brush) color from Krita",
+"forms.color_field.krita_background.button": "Background",
+"forms.color_field.krita_background.tooltip": "Use the background color from Krita",
 
 #endregion
 
@@ -563,6 +579,9 @@ L_EN: dict[str, str] = {
 "frame_export_panel.warning.no_active_document": "Document was closed during rendering.",
 "frame_export_panel.warning.document_not_rgba-8-bit": "Only RGBA 8-bit is supported, document has {colorModel}/{colorDepth}.",
 "frame_export_panel.render_done": "Done",
+"frame_export_panel.elapsed_seconds": "{seconds} s",
+"frame_export_panel.export_progress_preparing": "Preparing…",
+"frame_export_panel.export_to_file.dialog.filter": "PNG (*.png);;JPEG (*.jpg);;All files (*)",
 
 #endregion
 
@@ -675,6 +694,9 @@ L_EN: dict[str, str] = {
 "scene_tree_panel.buttons.add_group": "+ Group",
 "scene_tree_panel.buttons.duplicate": "Duplicate",
 "scene_tree_panel.buttons.delete": "Delete",
+
+"scene_tree_panel.on_add_group.warning.title": "Create Group",
+"scene_tree_panel.on_add_group.warning.text": "Selected nodes must have the same parent group.",
 
 #endregion
 

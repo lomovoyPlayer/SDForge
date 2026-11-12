@@ -347,8 +347,8 @@ class SceneTreePanel(QtWidgets.QWidget):
         }
         if len(parent_ids) != 1:
             QtWidgets.QMessageBox.information(
-                self, "Создать группу",
-                "Выделенные узлы должны быть в одной группе-родителе.")
+                self, localization.get_text("scene_tree_panel.on_add_group.warning.title"),
+                localization.get_text("scene_tree_panel.on_add_group.warning.text"))
             return
 
         parent_db_id = next(iter(parent_ids))

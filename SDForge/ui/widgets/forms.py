@@ -637,9 +637,9 @@ class ColorField(FormField):
     (модуль krita не импортируется) кнопки создаются скрытыми.
     """
 
-    def __init__(self, label="", binding=None, *, title="Цвет",
+    def __init__(self, label="", binding=None, *, title=None,
                  krita=False, **kw):
-        self._title = title
+        self._title = title or localization.get_text("forms.color_field.title")
         self._krita = krita
         self._color = [1.0, 1.0, 1.0]
         super().__init__(label, binding, **kw)
@@ -655,15 +655,15 @@ class ColorField(FormField):
 
     def _add_krita_buttons(self, row) -> None:
         self.krita_fg = QtWidgets.QToolButton()
-        self.krita_fg.setText("Кисть")
+        self.krita_fg.setText(localization.get_text("forms.color_field.krita_foreground.button"))
         self.krita_fg.setToolTip(
-            "Взять цвет переднего плана (кисти) из Krita")
+            localization.get_text("forms.color_field.krita_foreground.tooltip"))
         self.krita_fg.clicked.connect(
             lambda: self._grab_krita("foregroundColor"))
         row.addWidget(self.krita_fg)
         self.krita_bg = QtWidgets.QToolButton()
-        self.krita_bg.setText("Фон")
-        self.krita_bg.setToolTip("Взять фоновый цвет из Krita")
+        self.krita_bg.setText(localization.get_text("forms.color_field.krita_background.button"))
+        self.krita_bg.setToolTip(localization.get_text("forms.color_field.krita_background.tooltip"))
         self.krita_bg.clicked.connect(
             lambda: self._grab_krita("backgroundColor"))
         row.addWidget(self.krita_bg)

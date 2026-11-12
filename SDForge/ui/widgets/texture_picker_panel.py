@@ -339,7 +339,7 @@ class TexturePickerDialog(QtWidgets.QDialog):
         # элементы: {"filename", "name", "registered": bool}
         self._textures: List[Dict[str, Any]] = []
 
-        self.setWindowTitle(localization.get_text("texture_picker_panel.init.window_title", slot_name=_SLOT_TITLES.get(slot_name, slot_name)))
+        self.setWindowTitle(localization.get_text("texture_picker_panel.init.window_title", slot_title=_SLOT_TITLES.get(slot_name, slot_name)))
         self.setMinimumSize(640, 480)
         self.setModal(False)  # не блокируем инспектор
 
