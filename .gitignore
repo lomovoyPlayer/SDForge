@@ -1,7 +1,8 @@
 /*
-!/SDForge/
+!/SDForge_alfa/
 !/piplib/
-!/SDForge.desktop
+!/SDForge_alfa.desktop
+!/SDForge_pre-alfa.zip
 !.gitignore
 __pycache__/
 *.pyc
@@ -10,4 +11,3 @@ __pycache__/
 # VS Code and Kilo Code
 .vscode/
 .kilo/
-
