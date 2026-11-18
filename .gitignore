@@ -2,7 +2,6 @@
 !/SDForge_alfa/
 !/piplib/
 !/SDForge_alfa.desktop
-!/SDForge_pre-alfa.zip
 !.gitignore
 __pycache__/
 *.pyc
