@@ -29,7 +29,9 @@ from ..core.math_utils import *
 from PyQt5.QtGui import QVector3D, QVector2D
 from ..core.render.shader_builder import SDFShaderManager
 from ..core.data_classes import Figure, Operation, TreeObject, GroupOperation, Material, UNARY_OP_TYPE_NAMES, BINARY_OP_TYPE_NAMES
-from ..core.render.renderer_mgl import GPURenderer
+
+from ..core.render.renderer_pipeline_sdf import GPURenderer
+
 from ..config import SDF_FRAG_PATH, SDF_VERT_PATH, SDF_FRAG_FAST_PATH, log_debug, DEBUG_LOG_ENABLED
 from .. import localization
 
@@ -855,7 +857,7 @@ class SDFRenderPreviewer(QtWidgets.QWidget):
         # GL живёт в GUI-потоке: standalone-контекст moderngl в рабочем
         # потоке на этом драйвере читает FBO как мусор (диагностировано).
         # Методы рендерера принимают dict-payload — вызываем напрямую.
-        self.renderer = GPURenderer()
+        self.renderer = GPURenderer(use_thread=True)
         self.renderer.init_done.connect(self._on_renderer_ready)
         self.renderer.frame_ready.connect(self._on_frame_ready)
 

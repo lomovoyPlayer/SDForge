@@ -10,3 +10,7 @@ __pycache__/
 # VS Code and Kilo Code
 .vscode/
 .kilo/
+
+# экспериментальные файлы не для релиза
+*renderer_pipeline_baked_sdf.py
+*sdf_frag_baked.frag
