@@ -1,4 +1,4 @@
-from .pipeline_base import (
+from .legacy.pipeline_base import (
     BasePipelineRenderer,
     BufferInputSpec,
     CPUStage,
@@ -16,7 +16,6 @@ from .pipeline_base import (
     VertexStage,
 )
 from .renderer_pipeline_sdf import GPURenderer, SDFPipelineRenderer
-from .renderer_pipeline_baked_sdf import BakedSDFPipelineRenderer, BakeGridConfig
 
 __all__ = [
     "BakeGridConfig",

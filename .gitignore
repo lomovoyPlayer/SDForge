@@ -14,3 +14,5 @@ __pycache__/
 # экспериментальные файлы не для релиза
 *renderer_pipeline_baked_sdf.py
 *sdf_frag_baked.frag
+*legacy
+*тмп

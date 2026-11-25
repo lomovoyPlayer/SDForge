@@ -22,7 +22,7 @@ from PyQt5.QtGui import QImage, QPainter
 from ... import localization
 from ...config import DEBUG_LOG_ENABLED, DEFAULT_TEXTURE_MAX_SIZE, log_debug
 from ..data_classes import Figure, Material, Node, Operation, RGBA
-from .pipeline_base import (
+from .legacy.pipeline_base import (
     BasePipelineRenderer,
     CPUStage,
     FragmentStage,

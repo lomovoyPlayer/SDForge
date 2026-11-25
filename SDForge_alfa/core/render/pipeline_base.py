@@ -11,17 +11,24 @@ CPU-, Vertex- (Transform Feedback) и Fragment-этапы (полноэкран�
 import ctypes
 import datetime
 import inspect
+import json
 import math
+import os
+import shutil
 import struct
+import sys
 import threading
 import time
 import traceback
+from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
 import moderngl
+import numpy as np
 from PyQt5 import QtCore
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QProcess, QProcessEnvironment, Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtGui import QImage
 
 from ...config import DEBUG_LOG_ENABLED, DEBUG_LOG_PATH, log_debug
@@ -46,6 +53,106 @@ def _current_wgl_context_hex() -> str:
         return hex(ctx_ptr or 0)
     except Exception:
         return "n/a"
+
+_SHADER_WARMUP_SCRIPT = r"""
+import json
+import sys
+import moderngl
+
+def main():
+    raw = sys.stdin.read()
+    specs = json.loads(raw)
+    ctx = moderngl.create_context(standalone=True)
+    try:
+        for spec in specs:
+            prog = ctx.program(**spec)
+            prog.release()
+    finally:
+        ctx.release()
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
+        sys.exit(1)
+"""
+
+
+def find_piplib_dir(start_path: str | Path | None = None) -> Path | None:
+    """
+    Ищет каталог piplib автоматически:
+    1. Переменная окружения SDFORGE_PIPLIB_DIR (выставляется в init.py).
+    2. Поиск вверх от указанного пути (по умолчанию от pipeline_base.py).
+    """
+    env_dir = os.environ.get("SDFORGE_PIPLIB_DIR")
+    if env_dir:
+        p = Path(env_dir)
+        if p.is_dir():
+            return p
+
+    base = Path(start_path).resolve() if start_path is not None else Path(__file__).resolve()
+    if base.is_file():
+        base = base.parent
+    for parent in (base, *base.parents[:6]):
+        candidate = parent / "piplib"
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def find_warmup_python(
+    explicit_path: str | Path | None = None,
+    piplib_dir: str | Path | None = None,
+) -> str | None:
+    """
+    Ищет реальный интерпретатор Python для фонового QProcess-прогрева шейдеров,
+    избегая запуска хост-приложения (например, krita.exe).
+
+    Порядок поиска:
+    1. Явно переданный explicit_path.
+    2. Переменная окружения SDFORGE_WARMUP_PYTHON (выставляется в init.py).
+    3. Встроенный Python внутри piplib (piplib/python/python.exe, piplib/python.exe и т.д.).
+    4. sys.executable, если имя файла содержит 'python'.
+    5. Системный PATH (python, python3, py).
+    """
+    if explicit_path is not None:
+        p = Path(explicit_path)
+        if p.is_file():
+            return str(p)
+
+    env_py = os.environ.get("SDFORGE_WARMUP_PYTHON")
+    if env_py:
+        p = Path(env_py)
+        if p.is_file():
+            return str(p)
+
+    pip_dir = Path(piplib_dir) if piplib_dir is not None else find_piplib_dir()
+    if pip_dir is not None and pip_dir.is_dir():
+        rel_candidates = (
+            Path("python") / "python.exe",
+            Path("python.exe"),
+            Path("python") / "bin" / "python3",
+            Path("python") / "bin" / "python",
+            Path("bin") / "python3",
+            Path("bin") / "python",
+        )
+        for rel in rel_candidates:
+            candidate = pip_dir / rel
+            if candidate.is_file():
+                return str(candidate)
+
+    exe_name = os.path.basename(sys.executable).lower()
+    if "python" in exe_name and os.path.isfile(sys.executable):
+        return sys.executable
+
+    for name in ("python", "python3", "py"):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    return None
+
 
 
 # Совпадает с конвенцией sdf_vert.glsl: v_uv в диапазоне [-1..1]
@@ -249,14 +356,20 @@ class RenderTarget:
 class ResourcePool:
     """Пул именованных GPU-объектов, принадлежащий строго одному контексту ModernGL."""
 
-    def __init__(self, ctx: moderngl.Context, debug_cb: Callable[[str], None] | None = None):
+    def __init__(
+        self,
+        ctx: moderngl.Context,
+        debug_cb: Callable[[str], None] | None = None,
+        max_programs: int = 128,
+    ):
         self.ctx = ctx
         self._debug_cb = debug_cb
+        self._max_programs = max(1, int(max_programs))
         self.targets: dict[str, RenderTarget] = {}
         self.buffers: dict[str, moderngl.Buffer] = {}
         self.textures: dict[str, moderngl.Texture | moderngl.TextureArray] = {}
         self._texture_meta: dict[str, tuple] = {}
-        self._programs: dict[tuple, tuple[moderngl.Program, UniformAccessor]] = {}
+        self._programs: OrderedDict[tuple, tuple[moderngl.Program, UniformAccessor]] = OrderedDict()
         self._quad_vbo: moderngl.Buffer | None = None
         self.stats_program_hits: int = 0
         self.stats_program_misses: int = 0
@@ -291,6 +404,7 @@ class ResourcePool:
             return cur
 
         if cur is not None:
+            self.targets.pop(name, None)
             cur.release()
 
         tex = self.ctx.texture((w, h), components=components, dtype=dtype)
@@ -317,6 +431,7 @@ class ResourcePool:
         needed = len(data) if data is not None else max(4, int(reserve_bytes))
         buf = self.buffers.get(name)
         if buf is not None and buf.size != needed:
+            self.buffers.pop(name, None)
             buf.release()
             buf = None
         if buf is None:
@@ -348,6 +463,8 @@ class ResourcePool:
         cur = self.textures.get(name)
         created = False
         if cur is not None and self._texture_meta.get(name) != meta:
+            self.textures.pop(name, None)
+            self._texture_meta.pop(name, None)
             cur.release()
             cur = None
 
@@ -383,6 +500,8 @@ class ResourcePool:
         cur = self.textures.get(name)
         created = False
         if cur is not None and self._texture_meta.get(name) != meta:
+            self.textures.pop(name, None)
+            self._texture_meta.pop(name, None)
             cur.release()
             cur = None
 
@@ -451,6 +570,7 @@ class ResourcePool:
         key = (vert_src, frag_src, geom_src, tuple(varyings), varyings_capture_mode)
         cached = self._programs.get(key)
         if cached is not None:
+            self._programs.move_to_end(key)
             self.stats_program_hits += 1
             return cached[0], cached[1], True
 
@@ -473,6 +593,12 @@ class ResourcePool:
             raise
 
         accessor = UniformAccessor(prog, debug_cb=self._debug_cb)
+        while len(self._programs) >= self._max_programs:
+            _, (old_prog, _) = self._programs.popitem(last=False)
+            try:
+                old_prog.release()
+            except Exception:
+                pass
         self._programs[key] = (prog, accessor)
         return prog, accessor, False
 
@@ -494,29 +620,15 @@ class ResourcePool:
             raw = rt.fbo.read(components=4, alignment=1, dtype="f1")
             return QImage(raw, w, h, QImage.Format_RGBA8888).mirrored().copy()
 
-        # Универсальный путь для float-таргетов (например, при инспекции HDR-этапа в дебаге)
-        from array import array
+        # Векторизованный путь для float-таргетов (например, при инспекции HDR-этапа в дебаге)
         raw = rt.fbo.read(components=4, alignment=1, dtype="f4")
-        floats = array("f", raw)
-        out = bytearray(w * h * 4)
-        for y in range(h):
-            src_row = y * w * 4
-            dst_row = (h - 1 - y) * w * 4
-            for x in range(w):
-                si = src_row + x * 4
-                di = dst_row + x * 4
-                r, g, b, a = floats[si], floats[si + 1], floats[si + 2], floats[si + 3]
-                if not (math.isfinite(r) and math.isfinite(g) and math.isfinite(b) and math.isfinite(a)):
-                    if highlight_nan_inf:
-                        out[di : di + 4] = b"\xff\x00\xff\xff"
-                    else:
-                        out[di : di + 4] = b"\x00\x00\x00\xff"
-                    continue
-                out[di] = int(max(0.0, min(1.0, r)) * 255.0 + 0.5)
-                out[di + 1] = int(max(0.0, min(1.0, g)) * 255.0 + 0.5)
-                out[di + 2] = int(max(0.0, min(1.0, b)) * 255.0 + 0.5)
-                out[di + 3] = int(max(0.0, min(1.0, a)) * 255.0 + 0.5)
-        return QImage(bytes(out), w, h, QImage.Format_RGBA8888).copy()
+        arr = np.frombuffer(raw, dtype=np.float32).reshape((h, w, 4))[::-1]
+        finite_mask = np.isfinite(arr).all(axis=2)
+        clamped = np.clip(np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+        out = (clamped * 255.0 + 0.5).astype(np.uint8)
+        if not finite_mask.all():
+            out[~finite_mask] = (255, 0, 255, 255) if highlight_nan_inf else (0, 0, 0, 255)
+        return QImage(out.tobytes(), w, h, QImage.Format_RGBA8888).copy()
 
     def inspect_buffer_struct(self, buffer_name: str, fmt: str, count: int = 16) -> list[tuple]:
         """Прочитать первые count структур fmt из GPU-буфера для отладки VertexStage."""
@@ -727,7 +839,7 @@ class CPUStage(PipelineStage):
             self._gen = None
 
 
-@dataclass
+@dataclass(init=False)
 class BufferInputSpec:
     """Описание привязки вершинного буфера из ResourcePool к атрибутам шейдера."""
     buffer_name: str
@@ -835,6 +947,36 @@ class VertexStage(PipelineStage):
         return True
 
 
+@dataclass
+class TargetSpec:
+    """Спецификация целевого RenderTarget для FragmentStage."""
+    name: str = "main"
+    dtype: str | Callable[[PipelineContext], str] = "f1"
+    size: Callable[[PipelineContext], tuple[int, int]] | None = None
+    filter_mode: tuple[int, int] = (moderngl.LINEAR, moderngl.LINEAR)
+
+
+@dataclass
+class GeometrySpec:
+    """Спецификация геометрических буферов для FragmentStage."""
+    inputs: Sequence[BufferInputSpec] | None = None
+    index_buffer: str | None = None
+    primitive_mode: int = moderngl.TRIANGLE_STRIP
+    vertices: int | Callable[[PipelineContext], int] = -1
+    instances: int | Callable[[PipelineContext], int] = 1
+
+
+@dataclass
+class RenderStateSpec:
+    """Спецификация состояния OpenGL для FragmentStage."""
+    clear_color: tuple[float, float, float, float] | None = (0.0, 0.0, 0.0, 0.0)
+    depth_test: bool = False
+    enable_flags: int = moderngl.NOTHING
+    blend_func: tuple[int, int] | None = None
+    wireframe: bool = False
+    finish_each_step: bool = False
+
+
 class FragmentStage(PipelineStage):
     """
     Этап растеризации в RenderTarget (FBO).
@@ -872,6 +1014,9 @@ class FragmentStage(PipelineStage):
         condition: Callable[[PipelineContext], bool] | None = None,
         yield_after_step: bool | None = None,
         enabled: bool = True,
+        target_spec: TargetSpec | None = None,
+        geometry_spec: GeometrySpec | None = None,
+        render_state: RenderStateSpec | None = None,
     ):
         super().__init__(
             name=name,
@@ -881,25 +1026,49 @@ class FragmentStage(PipelineStage):
         self.fragment_shader = fragment_shader
         self.vertex_shader = vertex_shader
         self.geometry_shader = geometry_shader
-        self.target = target
-        self.target_dtype = target_dtype
-        self.target_size = target_size
-        self.target_filter = target_filter
-        self.geometry_inputs = list(geometry_inputs) if geometry_inputs is not None else None
-        self.index_buffer = index_buffer
-        self.primitive_mode = primitive_mode
-        self.vertices = vertices
-        self.instances = instances
+        if target_spec is not None:
+            self.target = target_spec.name
+            self.target_dtype = target_spec.dtype
+            self.target_size = target_spec.size
+            self.target_filter = target_spec.filter_mode
+        else:
+            self.target = target
+            self.target_dtype = target_dtype
+            self.target_size = target_size
+            self.target_filter = target_filter
+
+        if geometry_spec is not None:
+            self.geometry_inputs = list(geometry_spec.inputs) if geometry_spec.inputs is not None else None
+            self.index_buffer = geometry_spec.index_buffer
+            self.primitive_mode = geometry_spec.primitive_mode
+            self.vertices = geometry_spec.vertices
+            self.instances = geometry_spec.instances
+        else:
+            self.geometry_inputs = list(geometry_inputs) if geometry_inputs is not None else None
+            self.index_buffer = index_buffer
+            self.primitive_mode = primitive_mode
+            self.vertices = vertices
+            self.instances = instances
+
+        if render_state is not None:
+            self.clear_color = render_state.clear_color
+            self.depth_test = bool(render_state.depth_test)
+            self.enable_flags = render_state.enable_flags
+            self.blend_func = render_state.blend_func
+            self.wireframe = bool(render_state.wireframe)
+            self.finish_each_step = bool(render_state.finish_each_step)
+        else:
+            self.clear_color = clear_color
+            self.depth_test = bool(depth_test)
+            self.enable_flags = enable_flags
+            self.blend_func = blend_func
+            self.wireframe = bool(wireframe)
+            self.finish_each_step = bool(finish_each_step)
+
         self.samplers = dict(samplers or {})
         self.ubo_bindings = dict(ubo_bindings or {})
         self.uniform_binder = uniform_binder
         self.chunked = bool(chunked)
-        self.clear_color = clear_color
-        self.depth_test = bool(depth_test)
-        self.enable_flags = enable_flags
-        self.blend_func = blend_func
-        self.wireframe = bool(wireframe)
-        self.finish_each_step = bool(finish_each_step)
         self.condition = condition
 
         self._rt: RenderTarget | None = None
@@ -908,6 +1077,7 @@ class FragmentStage(PipelineStage):
         self._vao_key: tuple | None = None
         self._grid_w: int = 1
         self._grid_h: int = 1
+        self._active_chunk_size: int = 64
 
     def on_detach(self, pctx: PipelineContext) -> None:
         self._release_vao()
@@ -964,7 +1134,7 @@ class FragmentStage(PipelineStage):
                 for inp in self.geometry_inputs
             ]
             ibo = pctx.pool.buffers[self.index_buffer] if self.index_buffer else None
-            vao_key = (prog.glo, tuple(c[0].glo for c in content), ibo.glo if ibo else None)
+            vao_key = (prog.glo, tuple((c[0].glo, c[1], c[2:]) for c in content), ibo.glo if ibo else None)
             if self._vao is None or self._vao_key != vao_key:
                 self._release_vao()
                 self._vao = pctx.ctx.vertex_array(prog, content, index_buffer=ibo)
@@ -990,6 +1160,7 @@ class FragmentStage(PipelineStage):
             return 1
 
         cs = max(1, int(pctx.chunk_size))
+        self._active_chunk_size = cs
         self._grid_w = math.ceil(self._rt.size[0] / cs)
         self._grid_h = math.ceil(self._rt.size[1] / cs)
         return max(1, self._grid_w * self._grid_h)
@@ -1018,6 +1189,9 @@ class FragmentStage(PipelineStage):
             if tex is not None:
                 tex.use(location=slot)
 
+        for binding_idx, ubo_name in self.ubo_bindings.items():
+            pctx.pool.buffers[ubo_name].bind_to_uniform_block(binding=binding_idx)
+
         v_count = self.vertices(pctx) if callable(self.vertices) else int(self.vertices)
         inst_count = self.instances(pctx) if callable(self.instances) else int(self.instances)
 
@@ -1031,7 +1205,7 @@ class FragmentStage(PipelineStage):
 
             cx = step_index % self._grid_w
             cy = step_index // self._grid_w
-            cs = max(1, int(pctx.chunk_size))
+            cs = self._active_chunk_size
             x = cx * cs
             y = cy * cs
             w = min(cs, w_tot - x)
@@ -1103,7 +1277,7 @@ class RenderPipeline:
     def bind_context(self, pctx: PipelineContext | None) -> None:
         if self._pctx is pctx:
             return
-        if self._pctx is not None and pctx is None:
+        if self._pctx is not None:
             for st in self._stages:
                 st.on_detach(self._pctx)
         self._pctx = pctx
@@ -1273,6 +1447,8 @@ class PipelineRunner:
                 if iters > 0:
                     total += iters * self._estimate_yielding_steps(st.stages)
             elif isinstance(st, FragmentStage) and st.yield_after_step:
+                if st.condition is not None and not st.condition(self.pctx):
+                    continue
                 if st.chunked:
                     sz = st.target_size(self.pctx) if st.target_size is not None else (self.pctx.render_w, self.pctx.render_h)
                     gw = math.ceil(max(1, int(sz[0])) / cs)
@@ -1346,10 +1522,6 @@ class PipelineRunner:
                 frame.stage_est_steps = est
                 frame.step_idx = 0
                 frame.stage_active = True
-
-                # Ещё раз проверяем бюджет на случай, если begin() был нужен только для инициализации
-                if stage.yield_after_step and used_yielding >= yielding_budget:
-                    return False
 
             is_gpu_stage = stage.kind in ("vertex", "fragment")
             if dbg.enabled and dbg.check_gl_errors and is_gpu_stage:
@@ -1442,6 +1614,8 @@ class _PipelineWorker(QtCore.QObject):
     export_progress_changed = pyqtSignal(int, int)
     export_done = pyqtSignal(object)
     debug_report_ready = pyqtSignal(dict)
+    warmup_started = pyqtSignal()
+    warmup_finished = pyqtSignal(bool, str)
 
     def __init__(self, owner: "BasePipelineRenderer", in_worker_thread: bool):
         super().__init__(None)
@@ -1490,6 +1664,7 @@ class _PipelineWorker(QtCore.QObject):
                     f"vendor={info.get('GL_VENDOR')} renderer={info.get('GL_RENDERER')} "
                     f"gl_ver={info.get('GL_VERSION')} wgl_after={_current_wgl_context_hex()}"
                 )
+        if self.pool is None or self.pctx is None:
             self.pool = ResourcePool(self.ctx, debug_cb=self._owner._on_internal_debug_msg)
             self.pctx = PipelineContext(
                 ctx=self.ctx,
@@ -1541,7 +1716,7 @@ class _PipelineWorker(QtCore.QObject):
 
     @pyqtSlot(int, dict)
     def slot_start_frame(self, generation: int, payload: dict) -> None:
-        latest = self._owner._latest_frame_gen
+        latest = self._owner._get_latest_frame_gen()
         if self._in_worker_thread and generation < latest:
             if self._owner._is_debug_active():
                 self._owner._on_internal_debug_msg(
@@ -1623,15 +1798,23 @@ class _PipelineWorker(QtCore.QObject):
         self._active_mode = None
 
     @pyqtSlot(object)
-    def slot_mutate_pipeline(self, fn: Callable[[dict[str, RenderPipeline], PipelineContext | None], Any]) -> None:
-        self.slot_stop_render()
-        fn(self.pipelines, self.pctx)
+    def slot_mutate_pipeline(
+        self,
+        payload: tuple[Callable[[dict[str, RenderPipeline], PipelineContext | None], Any], list[BaseException | None]],
+    ) -> None:
+        fn, error_box = payload
+        try:
+            self.slot_stop_render()
+            fn(self.pipelines, self.pctx)
+        except BaseException as exc:
+            error_box[0] = exc
 
     @pyqtSlot()
     def slot_release_all(self) -> None:
         self.slot_stop_render()
         for pipe in self.pipelines.values():
             pipe.bind_context(None)
+        self.pipelines.clear()
         if self.pctx is not None:
             self._owner.on_release_custom_state(self.pctx)
         if self.pool is not None:
@@ -1736,15 +1919,26 @@ class BasePipelineRenderer(QtCore.QObject):
         *,
         use_thread: bool = False,
         debug_config: RenderDebugConfig | None = None,
+        warmup_python_executable: str | Path | None = None,
+        piplib_dir: str | Path | None = None,
     ):
         super().__init__(parent)
         self._use_thread = bool(use_thread)
         self.debug_config = debug_config or RenderDebugConfig(enabled=bool(DEBUG_LOG_ENABLED))
+        self._warmup_python_executable = warmup_python_executable
+        self._piplib_dir = Path(piplib_dir) if piplib_dir is not None else find_piplib_dir()
 
         self._state_lock = threading.Lock()
+        self._thread_lock = threading.Lock()
         self._last_image: QImage | None = None
         self._last_debug_report: dict[str, Any] | None = None
         self._latest_frame_gen: int = 0
+
+        self._warmup_process: QProcess | None = None
+        self._is_warming_up: bool = False
+        self._warmup_auto_init: bool = False
+        self._warmup_fallback_to_init: bool = True
+        self._warmup_init_payload: dict | None = None
 
         self._thread: QtCore.QThread | None = None
         self._worker = _PipelineWorker(self, in_worker_thread=self._use_thread)
@@ -1774,7 +1968,18 @@ class BasePipelineRenderer(QtCore.QObject):
     def is_threaded(self) -> bool:
         return self._use_thread
 
+    @property
+    def is_warming_up(self) -> bool:
+        return self._is_warming_up
+
     #region --- Точки расширения для наследников ---
+    def get_warmup_shaders(self, payload: dict | None = None) -> list[dict]:
+        """
+        Вернуть список словарей аргументов для ctx.program(**spec),
+        которые нужно предварительно скомпилировать в отдельном процессе (GLCache warmup).
+        """
+        return []
+
     def setup_pipelines(self, pctx: PipelineContext) -> dict[str, RenderPipeline]:
         """Создать и вернуть словарь именованных пайплайнов (вызывается при создании контекста)."""
         return {
@@ -1840,16 +2045,35 @@ class BasePipelineRenderer(QtCore.QObject):
 
     #region --- Управление пайплайнами и этапами налету ---
 
+    def _next_frame_gen(self) -> int:
+        with self._state_lock:
+            self._latest_frame_gen += 1
+            return self._latest_frame_gen
+
+    def _get_latest_frame_gen(self) -> int:
+        with self._state_lock:
+            return self._latest_frame_gen
+
     def _apply_pipeline_mutation(
         self, fn: Callable[[dict[str, RenderPipeline], PipelineContext | None], Any]
     ) -> None:
-        if self._use_thread and self._thread is not None and self._thread.isRunning():
-            if QtCore.QThread.currentThread() is self._thread:
-                self._worker.slot_mutate_pipeline(fn)
-            else:
-                self._sig_mutate_pipeline.emit(fn)
+        error_box: list[BaseException | None] = [None]
+        payload = (fn, error_box)
+        if self._use_thread:
+            with self._thread_lock:
+                thread = self._thread
+                running = thread is not None and thread.isRunning()
+                if running:
+                    if QtCore.QThread.currentThread() is thread:
+                        self._worker.slot_mutate_pipeline(payload)
+                    else:
+                        self._sig_mutate_pipeline.emit(payload)
+                else:
+                    self._worker.slot_mutate_pipeline(payload)
         else:
-            self._worker.slot_mutate_pipeline(fn)
+            self._worker.slot_mutate_pipeline(payload)
+        if error_box[0] is not None:
+            raise error_box[0]
 
     def get_pipeline(self, name: str = "preview") -> RenderPipeline | None:
         """Вернуть объект пайплайна (для чтения в однопоточном режиме или внутри воркера)."""
@@ -1896,15 +2120,17 @@ class BasePipelineRenderer(QtCore.QObject):
 
     def set_debug_mode(self, enabled: bool, **options) -> None:
         """Включить/выключить дебаг-режим и обновить опции RenderDebugConfig."""
-        self.debug_config.enabled = bool(enabled)
-        for key, val in options.items():
-            if not hasattr(self.debug_config, key):
-                raise AttributeError(f"RenderDebugConfig has no option '{key}'")
-            setattr(self.debug_config, key, val)
+        with self._state_lock:
+            self.debug_config.enabled = bool(enabled)
+            for key, val in options.items():
+                if not hasattr(self.debug_config, key):
+                    raise AttributeError(f"RenderDebugConfig has no option '{key}'")
+                setattr(self.debug_config, key, val)
 
     def set_test_shader_mode(self, enabled: bool) -> None:
         """Переключить глобальный тестовый фрагментный шейдер."""
-        self.debug_config.global_test_shader = bool(enabled)
+        with self._state_lock:
+            self.debug_config.global_test_shader = bool(enabled)
 
     def get_last_debug_report(self) -> dict[str, Any] | None:
         with self._state_lock:
@@ -1952,8 +2178,7 @@ class BasePipelineRenderer(QtCore.QObject):
                 f"SDForge.host.start_frame: prepare_frame_payload FAILED: {exc}\n{traceback.format_exc()}"
             )
             return
-        self._latest_frame_gen += 1
-        gen = self._latest_frame_gen
+        gen = self._next_frame_gen()
         if self._use_thread:
             self._sig_start_frame.emit(gen, prepared)
         else:
@@ -1971,23 +2196,155 @@ class BasePipelineRenderer(QtCore.QObject):
     @pyqtSlot()
     def stop_render(self) -> None:
         # Инкремент поколения мгновенно отсекает уже стоящие в очереди старые start_frame
-        self._latest_frame_gen += 1
+        self._next_frame_gen()
         if self._use_thread:
             self._sig_stop_render.emit()
         else:
             self._worker.slot_stop_render()
 
+    def warmup_shaders(
+        self,
+        shaders: list[dict] | None = None,
+        *,
+        init_payload: dict | None = None,
+        auto_initialize: bool = True,
+        fallback_to_init: bool = True,
+    ) -> bool:
+        """
+        Асинхронно прогревает драйверный кеш шейдеров (GLCache) в отдельном процессе QProcess.
+        Путь к встроенному Python и piplib определяется автоматически (через init.py / автопоиск).
+        """
+        if self._is_warming_up:
+            return False
+
+        specs = shaders if shaders is not None else self.get_warmup_shaders(init_payload)
+        if not specs:
+            self.warmup_finished.emit(True, "")
+            if auto_initialize:
+                self.initialize(init_payload or {})
+            return True
+
+        python_exe = find_warmup_python(self._warmup_python_executable, self._piplib_dir)
+        if python_exe is None:
+            msg = "Python interpreter not found for out-of-process shader warmup"
+            self._on_internal_debug_msg(f"SDForge.warmup: {msg}")
+            self.warmup_finished.emit(False, msg)
+            if auto_initialize and fallback_to_init:
+                self.initialize(init_payload or {})
+            return False
+
+        proc = QProcess(self)
+        env = QProcessEnvironment.systemEnvironment()
+        extra_paths: list[str] = []
+        if self._piplib_dir is not None and self._piplib_dir.is_dir():
+            extra_paths.append(str(self._piplib_dir))
+        for p in sys.path:
+            if p and p not in extra_paths:
+                extra_paths.append(p)
+        existing_pp = env.value("PYTHONPATH", "")
+        if existing_pp:
+            extra_paths.append(existing_pp)
+        env.insert("PYTHONPATH", os.pathsep.join(extra_paths))
+        proc.setProcessEnvironment(env)
+        proc.setProgram(python_exe)
+        proc.setArguments(["-c", _SHADER_WARMUP_SCRIPT])
+        proc.finished.connect(self._on_warmup_finished)
+        proc.errorOccurred.connect(self._on_warmup_error)
+
+        self._warmup_process = proc
+        self._is_warming_up = True
+        self._warmup_auto_init = bool(auto_initialize)
+        self._warmup_fallback_to_init = bool(fallback_to_init)
+        self._warmup_init_payload = dict(init_payload) if init_payload is not None else {}
+        self.warmup_started.emit()
+
+        proc.start()
+        payload_bytes = json.dumps(specs).encode("utf-8")
+        proc.write(payload_bytes)
+        proc.closeWriteChannel()
+        return True
+
+    def cancel_warmup(self) -> None:
+        """Немедленно останавливает фоновый прогрев шейдеров без блокировки GUI."""
+        proc = self._warmup_process
+        if proc is None:
+            return
+        self._warmup_process = None
+        self._is_warming_up = False
+        self._warmup_auto_init = False
+        self._warmup_init_payload = None
+        try:
+            proc.finished.disconnect(self._on_warmup_finished)
+        except Exception:
+            pass
+        try:
+            proc.errorOccurred.disconnect(self._on_warmup_error)
+        except Exception:
+            pass
+        if proc.state() != QProcess.NotRunning:
+            proc.kill()
+        proc.deleteLater()
+
+    def _on_warmup_finished(self, exit_code: int, exit_status) -> None:
+        proc = self._warmup_process
+        auto_init = self._warmup_auto_init
+        fallback = self._warmup_fallback_to_init
+        init_payload = self._warmup_init_payload or {}
+
+        self._warmup_process = None
+        self._is_warming_up = False
+        self._warmup_auto_init = False
+        self._warmup_init_payload = None
+
+        err_text = ""
+        if proc is not None:
+            err_text = bytes(proc.readAllStandardError()).decode("utf-8", errors="replace").strip()
+            proc.deleteLater()
+
+        ok = (exit_code == 0 and exit_status == QProcess.NormalExit)
+        if not ok:
+            self._on_internal_debug_msg(f"SDForge.warmup failed (code={exit_code}): {err_text}")
+        self.warmup_finished.emit(ok, "" if ok else (err_text or f"Exit code {exit_code}"))
+
+        if auto_init and (ok or fallback):
+            self.initialize(init_payload)
+
+    def _on_warmup_error(self, error) -> None:
+        if not self._is_warming_up:
+            return
+        proc = self._warmup_process
+        auto_init = self._warmup_auto_init
+        fallback = self._warmup_fallback_to_init
+        init_payload = self._warmup_init_payload or {}
+
+        self._warmup_process = None
+        self._is_warming_up = False
+        self._warmup_auto_init = False
+        self._warmup_init_payload = None
+
+        err_msg = proc.errorString() if proc is not None else str(error)
+        if proc is not None:
+            proc.deleteLater()
+        self._on_internal_debug_msg(f"SDForge.warmup QProcess error: {err_msg}")
+        self.warmup_finished.emit(False, f"QProcess error: {err_msg}")
+
+        if auto_init and fallback:
+            self.initialize(init_payload)
+
     @pyqtSlot()
     def release_all(self) -> None:
-        self._latest_frame_gen += 1
+        self.cancel_warmup()
+        self._next_frame_gen()
         if self._use_thread:
-            if self._thread is not None and self._thread.isRunning():
-                if QtCore.QThread.currentThread() is self._thread:
-                    self._worker.slot_release_all()
-                else:
-                    self._sig_release_all.emit()
-                self._thread.quit()
-                self._thread.wait(5000)
+            with self._thread_lock:
+                thread = self._thread
+                if thread is not None and thread.isRunning():
+                    if QtCore.QThread.currentThread() is thread:
+                        self._worker.slot_release_all()
+                    else:
+                        self._sig_release_all.emit()
+                    thread.quit()
+                    thread.wait(5000)
         else:
             self._worker.slot_release_all()
 
